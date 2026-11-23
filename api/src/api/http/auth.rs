@@ -5053,6 +5053,34 @@ async fn refuse_key_egress_for_verified_minor(
     Ok(())
 }
 
+/// content-web: refuse raw-key export for held keys, and for every key when
+/// `KEY_EXPORT_DISABLED=true`. Leaving means replacing the key, never
+/// exporting it. Held keys stay held after they are claimed.
+async fn refuse_export_for_held_key(
+    pool: &PgPool,
+    tenant_id: i64,
+    user_pubkey: &str,
+    endpoint: &'static str,
+) -> Result<(), AuthError> {
+    if endpoint != EXPORT_KEY_ENDPOINT {
+        return Ok(());
+    }
+    let all_disabled = std::env::var("KEY_EXPORT_DISABLED").as_deref() == Ok("true");
+    if all_disabled
+        || keycast_core::repositories::held_key::HeldKeyRepository::new(pool.clone())
+            .is_held_key(user_pubkey, tenant_id)
+            .await?
+    {
+        tracing::warn!(
+            event = "held_key_export_denied",
+            user_pubkey = %user_pubkey,
+            "held key export refused"
+        );
+        return Err(AuthError::KeyEgressDenied);
+    }
+    Ok(())
+}
+
 /// Build an auth event for one raw-key egress outcome.
 #[allow(clippy::too_many_arguments)]
 fn key_egress_event_record(
@@ -5275,7 +5303,13 @@ async fn enforce_key_egress_policy(
     endpoint: &'static str,
     operation: &str,
 ) -> Result<(), AuthError> {
-    match refuse_key_egress_for_verified_minor(user_repo, tenant_id, user_pubkey, operation).await {
+    let refusal = match refuse_export_for_held_key(pool, tenant_id, user_pubkey, endpoint).await {
+        Ok(()) => {
+            refuse_key_egress_for_verified_minor(user_repo, tenant_id, user_pubkey, operation).await
+        }
+        Err(error) => Err(error),
+    };
+    match refusal {
         Ok(()) => Ok(()),
         Err(AuthError::KeyEgressDenied) => {
             record_key_egress_event(

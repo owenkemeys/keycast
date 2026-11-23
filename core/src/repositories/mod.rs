@@ -9,6 +9,7 @@ mod authorization;
 mod claim_token;
 mod email_marketing;
 mod error;
+pub mod held_key;
 mod oauth_authorization;
 mod oauth_code;
 mod personal_keys;

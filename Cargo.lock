@@ -3722,6 +3722,7 @@ dependencies = [
  "moka",
  "nostr 0.44.8",
  "nostr 0.45.5",
+ "nostr-relay-builder",
  "nostr-sdk",
  "once_cell",
  "p256 0.13.2",

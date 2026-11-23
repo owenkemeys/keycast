@@ -261,11 +261,12 @@ Build with AWS support when using `KMS_PROVIDER=aws`: `cargo build --release --b
 
 If neither is set, requests from unknown domains are rejected.
 
-### Email (SendGrid)
+### Email (Resend)
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SENDGRID_API_KEY` | *(none)* | If set, sends via SendGrid; required in production unless `DISABLE_EMAILS=true` |
+| `RESEND_API_KEY` | *(none)* | If set, sends via Resend; required in production unless `DISABLE_EMAILS=true` |
+| `RESEND_API_URL` | `https://api.resend.com` | Resend API base URL (tests point it at a mock) |
 | `DISABLE_EMAILS` | *(none)* | Set to `true` to explicitly disable email delivery |
 | `FROM_EMAIL` | — | Sender email address |
 | `FROM_NAME` | `Divine` | Sender display name |
@@ -314,6 +315,60 @@ bun run deploy
 [`cloudbuild.yaml`](./cloudbuild.yaml) builds the container image, runs database migrations as a job (`keycast --migrate`, using SQLx's embedded migrator), and rolls out the new revision. Migrations run before the new revision takes traffic so the schema always matches the running code.
 
 Because decrypted keys are cached per instance and the NIP-46 signer holds long-lived relay connections, the service runs with a minimum instance count and session affinity, and the binary implements a phased graceful shutdown sized to the platform's SIGTERM grace period. For the full production topology, resources, and operational runbook, see [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md).
+
+## content-web fork: development stack on Jarvis
+
+This fork adds what content-web needs: held keys for outside accounts, Sign in
+with GitHub, no key export for held keys, a Resend email sender, and encrypted
+email addresses. The stack below is for **development only**: it uses the
+local file master key, which must never be used in production.
+
+It runs without Docker: native Postgres and Valkey (or Redis), all bound to
+127.0.0.1 on ports 4300-4302.
+
+| Port | Service |
+| --- | --- |
+| 4300 | Keycast (HTTP API and signer) |
+| 4301 | Postgres |
+| 4302 | Valkey |
+
+```bash
+scripts/content-web-dev.sh init     # once: databases, master.key, .dev/dev.env (mode 600)
+scripts/content-web-dev.sh build    # debug build of the keycast binary
+scripts/content-web-dev.sh start    # start Postgres, Valkey, run migrations, start Keycast
+scripts/content-web-dev.sh status
+scripts/content-web-dev.sh stop     # stop all three, by PID
+scripts/content-web-dev.sh test -- --test-threads=2   # full test suite; needs Postgres and Valkey running
+```
+
+`start` and `stop` handle Postgres and Valkey too; `test` needs them running,
+so run `start` (or `init`) first and `stop` afterwards. Secrets live only in
+`.dev/dev.env` and `master.key`, both gitignored, and are never printed.
+
+### Settings added by this fork
+
+| Variable | Purpose |
+| --- | --- |
+| `BIND_ADDRESS` | Bind the API to this one address (the dev stack uses `127.0.0.1`). Unset keeps upstream behaviour: all interfaces. |
+| `KEYCAST_HELD_KEY_SERVICE_TOKEN` | Bearer token for `POST /api/service/held-keys`. Only our server holds it; it grants nothing else. |
+| `HELD_KEY_PROFILE_RELAYS` | Comma-separated relays for the "held for github:<id>, unclaimed" profile. Outside production only loopback `ws://` relays are accepted; in production only `wss://`. |
+| `HELD_KEY_RATE_LIMIT_PER_HOUR`, `HELD_KEY_RATE_LIMIT_PER_DAY` | New held keys allowed per publisher per hour (default 50) and per tenant per day (default 2000). |
+| `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GITHUB_REDIRECT_URI` | The GitHub App's client id and secret, and our callback (`.../api/auth/github/callback`). Sign-in is off unless the client id is set. |
+| `GITHUB_AUTHORIZE_URL`, `GITHUB_TOKEN_URL`, `GITHUB_API_URL` | GitHub endpoints; defaults are github.com. Tests point them at a mock. |
+| `GITHUB_POST_LOGIN_REDIRECT` | Where the browser lands after GitHub sign-in (default `APP_URL`). |
+| `KEY_EXPORT_DISABLED` | `true` refuses key export for every account. Held keys are always refused. |
+| `RESEND_API_KEY`, `RESEND_API_URL` | Resend sender (replaces SendGrid). Required in production unless `DISABLE_EMAILS=true`. |
+| `FROM_EMAIL`, `FROM_NAME` | Sender, e.g. `noreply@mail.creditedby.com` on the domain verified in Resend. Turn click and open tracking off for that domain in Resend. |
+
+### Routes added by this fork
+
+- `POST /api/service/held-keys` with `{"account_id": "github:123456"}` and
+  `Authorization: Bearer $KEYCAST_HELD_KEY_SERVICE_TOKEN`. Returns the held
+  key's pubkey; repeat calls return the same key.
+- `GET /api/auth/github/start` and `GET /api/auth/github/callback`: Sign in
+  with GitHub through the GitHub App user-authorization flow (PKCE). The
+  numeric GitHub user id maps to the held key `github:<id>`, which is created
+  if needed and marked claimed; a normal Keycast session cookie is set.
 
 ## History & Team Key Management
 

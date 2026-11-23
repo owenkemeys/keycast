@@ -1,5 +1,5 @@
 // ABOUTME: Email service abstraction for sending verification and password reset emails
-// ABOUTME: Supports SendGrid for production and captured email in development/testing
+// ABOUTME: Supports Resend for production and captured email in development/testing
 
 use async_trait::async_trait;
 use serde::Serialize;
@@ -469,70 +469,76 @@ impl EmailSender for DevEmailSender {
     }
 }
 
-// SendGrid API types
-#[derive(Debug, Serialize)]
-struct SendGridEmail {
-    personalizations: Vec<Personalization>,
-    from: EmailAddress,
-    subject: String,
-    content: Vec<Content>,
-    tracking_settings: TrackingSettings,
+/// Request body for Resend's `POST /emails`
+/// (https://resend.com/docs/api-reference/emails/send-email).
+#[derive(Serialize)]
+struct ResendEmail<'a> {
+    from: String,
+    to: [&'a str; 1],
+    subject: &'a str,
+    html: &'a str,
+    text: &'a str,
 }
 
-#[derive(Debug, Serialize)]
-struct TrackingSettings {
-    click_tracking: ClickTracking,
-    open_tracking: OpenTracking,
+/// Settings for [`ResendEmailSender`]. Never logged: `api_key` is a secret.
+#[derive(Clone)]
+pub struct ResendConfig {
+    /// `RESEND_API_KEY`
+    pub api_key: String,
+    /// `RESEND_API_URL`, default `https://api.resend.com` (tests point it at a mock).
+    pub api_url: String,
+    /// `FROM_EMAIL`, an address on the domain verified in Resend, e.g. `noreply@mail.creditedby.com`.
+    pub from_email: String,
+    /// `FROM_NAME`
+    pub from_name: String,
+    /// `BASE_URL` or `APP_URL`, used to build links in emails.
+    pub base_url: String,
 }
 
-#[derive(Debug, Serialize)]
-struct ClickTracking {
-    enable: bool,
+impl ResendConfig {
+    /// Read the settings from the environment.
+    #[must_use]
+    pub fn from_env(api_key: String) -> Self {
+        Self {
+            api_key,
+            api_url: env::var("RESEND_API_URL")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or_else(|| "https://api.resend.com".to_string()),
+            from_email: env::var("FROM_EMAIL")
+                .unwrap_or_else(|_| "noreply@mail.creditedby.com".to_string()),
+            from_name: env::var("FROM_NAME").unwrap_or_else(|_| BRAND_NAME.to_string()),
+            base_url: env::var("BASE_URL")
+                .or_else(|_| env::var("APP_URL"))
+                .unwrap_or_else(|_| "http://localhost:5173".to_string()),
+        }
+    }
 }
 
-#[derive(Debug, Serialize)]
-struct OpenTracking {
-    enable: bool,
-}
-
-#[derive(Debug, Serialize)]
-struct Personalization {
-    to: Vec<EmailAddress>,
-}
-
-#[derive(Debug, Serialize)]
-struct EmailAddress {
-    email: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct Content {
-    #[serde(rename = "type")]
-    content_type: String,
-    value: String,
-}
-
-/// Production email sender using SendGrid API
-pub struct SendGridEmailSender {
+pub struct ResendEmailSender {
     api_key: String,
+    api_url: String,
     from_email: String,
     from_name: String,
     base_url: String,
     client: reqwest::Client,
 }
 
-impl SendGridEmailSender {
+impl ResendEmailSender {
     pub fn new(api_key: String) -> Result<Self, String> {
-        let from_email =
-            env::var("FROM_EMAIL").unwrap_or_else(|_| "noreply@divine.video".to_string());
-        let from_name = env::var("FROM_NAME").unwrap_or_else(|_| BRAND_NAME.to_string());
-        let base_url = env::var("BASE_URL")
-            .or_else(|_| env::var("APP_URL"))
-            .unwrap_or_else(|_| "http://localhost:5173".to_string());
+        Self::with_config(ResendConfig::from_env(api_key))
+    }
 
-        tracing::info!("Email service initialized with SendGrid");
+    pub fn with_config(config: ResendConfig) -> Result<Self, String> {
+        let ResendConfig {
+            api_key,
+            api_url,
+            from_email,
+            from_name,
+            base_url,
+        } = config;
+
+        tracing::info!("Email service initialized with Resend");
 
         let connect_timeout = duration_from_env("EMAIL_PROVIDER_CONNECT_TIMEOUT_MS", 3_000);
         let request_timeout = duration_from_env("EMAIL_PROVIDER_REQUEST_TIMEOUT_MS", 10_000);
@@ -544,6 +550,7 @@ impl SendGridEmailSender {
 
         Ok(Self {
             api_key,
+            api_url: api_url.trim_end_matches('/').to_string(),
             from_email,
             from_name,
             base_url,
@@ -564,41 +571,22 @@ impl SendGridEmailSender {
             return Ok(());
         }
 
-        let email = SendGridEmail {
-            personalizations: vec![Personalization {
-                to: vec![EmailAddress {
-                    email: to_email.to_string(),
-                    name: None,
-                }],
-            }],
-            from: EmailAddress {
-                email: self.from_email.clone(),
-                name: Some(self.from_name.clone()),
-            },
-            subject: subject.to_string(),
-            content: vec![
-                Content {
-                    content_type: "text/plain".to_string(),
-                    value: text_content.to_string(),
-                },
-                Content {
-                    content_type: "text/html".to_string(),
-                    value: html_content.to_string(),
-                },
-            ],
-            // Disable tracking for security-sensitive emails (verification, password reset)
-            // to prevent tokens from passing through SendGrid's redirect servers
-            tracking_settings: TrackingSettings {
-                click_tracking: ClickTracking { enable: false },
-                open_tracking: OpenTracking { enable: false },
-            },
+        // Resend has no per-message tracking switch: click and open tracking
+        // must stay off on the sending domain, so tokens in links never pass
+        // through a redirect server.
+        let from = format!("{} <{}>", self.from_name, self.from_email);
+        let email = ResendEmail {
+            from,
+            to: [to_email],
+            subject,
+            html: html_content,
+            text: text_content,
         };
 
         let response = self
             .client
-            .post("https://api.sendgrid.com/v3/mail/send")
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
+            .post(format!("{}/emails", self.api_url))
+            .bearer_auth(&self.api_key)
             .json(&email)
             .send()
             .await
@@ -638,7 +626,7 @@ fn duration_from_env(name: &str, default_ms: u64) -> Duration {
 }
 
 #[async_trait]
-impl EmailSender for SendGridEmailSender {
+impl EmailSender for ResendEmailSender {
     async fn send_verification_email(
         &self,
         to_email: &str,
@@ -876,13 +864,13 @@ impl EmailSender for SendGridEmailSender {
 }
 
 /// Create the appropriate email sender based on environment
-/// - If SENDGRID_API_KEY is set and non-empty: use SendGrid (production)
-/// - If running in production without SENDGRID_API_KEY and without DISABLE_EMAILS: fail with error
+/// - If RESEND_API_KEY is set and non-empty: use Resend (production)
+/// - If running in production without RESEND_API_KEY and without DISABLE_EMAILS: fail with error
 /// - Otherwise (development): use DevEmailSender as fallback
 pub fn create_email_sender() -> Result<Arc<dyn EmailSender>, String> {
-    if let Ok(api_key) = env::var("SENDGRID_API_KEY") {
+    if let Ok(api_key) = env::var("RESEND_API_KEY") {
         if !api_key.is_empty() {
-            return Ok(Arc::new(SendGridEmailSender::new(api_key)?));
+            return Ok(Arc::new(ResendEmailSender::new(api_key)?));
         }
     }
 
@@ -896,18 +884,18 @@ pub fn create_email_sender() -> Result<Arc<dyn EmailSender>, String> {
             .is_none()
     {
         return Err(
-            "SENDGRID_API_KEY required in production (set DISABLE_EMAILS=true to override)"
+            "RESEND_API_KEY required in production (set DISABLE_EMAILS=true to override)"
                 .to_string(),
         );
     }
 
-    tracing::warn!("SENDGRID_API_KEY not set - using development email sender");
+    tracing::warn!("RESEND_API_KEY not set - using development email sender");
     Ok(Arc::new(DevEmailSender::new()))
 }
 
 /// Validate production email configuration without constructing a provider client.
 pub fn validate_email_configuration() -> Result<(), String> {
-    if env::var("SENDGRID_API_KEY")
+    if env::var("RESEND_API_KEY")
         .ok()
         .is_some_and(|value| !value.is_empty())
     {
@@ -923,7 +911,7 @@ pub fn validate_email_configuration() -> Result<(), String> {
             .is_none()
     {
         return Err(
-            "SENDGRID_API_KEY required in production (set DISABLE_EMAILS=true to override)"
+            "RESEND_API_KEY required in production (set DISABLE_EMAILS=true to override)"
                 .to_string(),
         );
     }
@@ -1119,10 +1107,10 @@ mod tests {
     }
 
     #[test]
-    fn test_production_without_sendgrid_key_fails() {
+    fn test_production_without_resend_key_fails() {
         let result = with_env_vars(
             &[
-                ("SENDGRID_API_KEY", None),
+                ("RESEND_API_KEY", None),
                 ("RUST_ENV", Some("production")),
                 ("NODE_ENV", None),
                 ("DISABLE_EMAILS", None),
@@ -1131,7 +1119,7 @@ mod tests {
         );
         let err = result.err().expect("expected an error");
         assert!(
-            err.contains("SENDGRID_API_KEY required in production"),
+            err.contains("RESEND_API_KEY required in production"),
             "unexpected error message: {}",
             err
         );
@@ -1141,7 +1129,7 @@ mod tests {
     fn test_production_with_disable_emails_ok() {
         let result = with_env_vars(
             &[
-                ("SENDGRID_API_KEY", None),
+                ("RESEND_API_KEY", None),
                 ("RUST_ENV", Some("production")),
                 ("NODE_ENV", None),
                 ("DISABLE_EMAILS", Some("true")),
@@ -1152,10 +1140,10 @@ mod tests {
     }
 
     #[test]
-    fn test_production_with_sendgrid_key_ok() {
+    fn test_production_with_resend_key_ok() {
         let result = with_env_vars(
             &[
-                ("SENDGRID_API_KEY", Some("SG.test-key-value")),
+                ("RESEND_API_KEY", Some("re_test_not_a_real_key")),
                 ("RUST_ENV", Some("production")),
                 ("NODE_ENV", None),
                 ("DISABLE_EMAILS", None),
@@ -1166,10 +1154,10 @@ mod tests {
     }
 
     #[test]
-    fn test_development_without_sendgrid_key_ok() {
+    fn test_development_without_resend_key_ok() {
         let result = with_env_vars(
             &[
-                ("SENDGRID_API_KEY", None),
+                ("RESEND_API_KEY", None),
                 ("RUST_ENV", None),
                 ("NODE_ENV", None),
                 ("DISABLE_EMAILS", None),
@@ -1180,10 +1168,10 @@ mod tests {
     }
 
     #[test]
-    fn test_production_via_node_env_without_sendgrid_key_fails() {
+    fn test_production_via_node_env_without_resend_key_fails() {
         let result = with_env_vars(
             &[
-                ("SENDGRID_API_KEY", None),
+                ("RESEND_API_KEY", None),
                 ("RUST_ENV", None),
                 ("NODE_ENV", Some("production")),
                 ("DISABLE_EMAILS", None),
@@ -1194,10 +1182,10 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_sendgrid_key_treated_as_unset() {
+    fn test_empty_resend_key_treated_as_unset() {
         let result = with_env_vars(
             &[
-                ("SENDGRID_API_KEY", Some("")),
+                ("RESEND_API_KEY", Some("")),
                 ("RUST_ENV", Some("production")),
                 ("NODE_ENV", None),
                 ("DISABLE_EMAILS", None),
@@ -1208,10 +1196,10 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_disable_emails_still_requires_sendgrid_in_production() {
+    fn test_empty_disable_emails_still_requires_resend_in_production() {
         let result = with_env_vars(
             &[
-                ("SENDGRID_API_KEY", None),
+                ("RESEND_API_KEY", None),
                 ("RUST_ENV", Some("production")),
                 ("NODE_ENV", None),
                 ("DISABLE_EMAILS", Some("")),
@@ -1222,5 +1210,166 @@ mod tests {
             result.is_err(),
             "Empty DISABLE_EMAILS should not bypass production check"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Resend sender against a mock Resend API
+    // ------------------------------------------------------------------
+
+    /// (Authorization header, JSON body) of each request the mock received.
+    type RecordedRequests = Arc<Mutex<Vec<(Option<String>, serde_json::Value)>>>;
+
+    #[derive(Clone, Default)]
+    struct MockResend {
+        requests: RecordedRequests,
+        status: Arc<Mutex<u16>>,
+    }
+
+    async fn mock_resend_emails(
+        axum::extract::State(mock): axum::extract::State<MockResend>,
+        headers: axum::http::HeaderMap,
+        axum::Json(body): axum::Json<serde_json::Value>,
+    ) -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
+        let auth = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        mock.requests.lock().unwrap().push((auth, body));
+        let status = *mock.status.lock().unwrap();
+        (
+            axum::http::StatusCode::from_u16(status).unwrap(),
+            axum::Json(serde_json::json!({ "id": "mock-email-id" })),
+        )
+    }
+
+    async fn start_mock_resend(status: u16) -> (String, MockResend) {
+        let mock = MockResend::default();
+        *mock.status.lock().unwrap() = status;
+        let app = axum::Router::new()
+            .route("/emails", axum::routing::post(mock_resend_emails))
+            .with_state(mock.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}"), mock)
+    }
+
+    fn resend_sender(api_url: String) -> ResendEmailSender {
+        ResendEmailSender::with_config(ResendConfig {
+            // TEST HARNESS ONLY: not a real key.
+            api_key: "re_test_not_a_real_key".to_string(),
+            api_url,
+            from_email: "noreply@mail.creditedby.com".to_string(),
+            from_name: "Credited By".to_string(),
+            base_url: "https://keys.example.test".to_string(),
+        })
+        .unwrap()
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn resend_sends_verification_email_with_expected_request() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        env::remove_var("DISABLE_EMAILS");
+        let (url, mock) = start_mock_resend(200).await;
+        let sender = resend_sender(format!("{url}/"));
+
+        sender
+            .send_verification_email("person@example.test", "tok123", Some("123456"))
+            .await
+            .expect("accepted");
+
+        let requests = mock.requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 1);
+        let (auth, body) = &requests[0];
+        assert_eq!(auth.as_deref(), Some("Bearer re_test_not_a_real_key"));
+        assert_eq!(body["from"], "Credited By <noreply@mail.creditedby.com>");
+        assert_eq!(body["to"], serde_json::json!(["person@example.test"]));
+        assert!(body["subject"].as_str().unwrap().contains("Verify"));
+        let verify_url = "https://keys.example.test/verify-email?token=tok123";
+        assert!(body["html"].as_str().unwrap().contains(verify_url));
+        assert!(body["text"].as_str().unwrap().contains(verify_url));
+        assert!(body["text"].as_str().unwrap().contains("123456"));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn resend_maps_provider_failures() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        env::remove_var("DISABLE_EMAILS");
+        for (status, expected) in [
+            (429, EmailSendError::RateLimited),
+            (422, EmailSendError::Rejected),
+            (401, EmailSendError::Rejected),
+            (500, EmailSendError::Unavailable),
+        ] {
+            let (url, _mock) = start_mock_resend(status).await;
+            let err = resend_sender(url)
+                .send_password_reset_email("person@example.test", "reset-tok")
+                .await
+                .expect_err("provider refused");
+            assert_eq!(
+                std::mem::discriminant(&err),
+                std::mem::discriminant(&expected),
+                "status {status}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn resend_unreachable_is_unavailable() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        env::remove_var("DISABLE_EMAILS");
+        // Bind then drop, so the port is closed.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let err = resend_sender(url)
+            .send_claim_confirmation("person@example.test", "tok")
+            .await
+            .expect_err("unreachable");
+        assert!(matches!(
+            err,
+            EmailSendError::Unavailable | EmailSendError::TimedOut
+        ));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn resend_disable_emails_skips_provider() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (url, mock) = start_mock_resend(200).await;
+        env::set_var("DISABLE_EMAILS", "true");
+        let result = resend_sender(url)
+            .send_claim_email("person@example.test", "https://keys.example.test/claim")
+            .await;
+        env::remove_var("DISABLE_EMAILS");
+        result.expect("skipped");
+        assert!(mock.requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn resend_config_reads_environment() {
+        let config = with_env_vars(
+            &[
+                ("RESEND_API_URL", Some("http://127.0.0.1:4319")),
+                ("FROM_EMAIL", Some("noreply@mail.creditedby.com")),
+                ("FROM_NAME", Some("Credited By")),
+                ("BASE_URL", Some("https://keys.example.test")),
+            ],
+            || ResendConfig::from_env("re_test_not_a_real_key".to_string()),
+        );
+        assert_eq!(config.api_url, "http://127.0.0.1:4319");
+        assert_eq!(config.from_email, "noreply@mail.creditedby.com");
+        assert_eq!(config.from_name, "Credited By");
+        assert_eq!(config.base_url, "https://keys.example.test");
+        let defaults = with_env_vars(&[("RESEND_API_URL", None), ("FROM_EMAIL", None)], || {
+            ResendConfig::from_env("re_test_not_a_real_key".to_string())
+        });
+        assert_eq!(defaults.api_url, "https://api.resend.com");
+        assert_eq!(defaults.from_email, "noreply@mail.creditedby.com");
     }
 }

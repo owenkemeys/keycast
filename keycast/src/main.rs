@@ -1118,6 +1118,13 @@ fn validate_environment() -> Result<(), String> {
         errors.push(Box::leak(e.into_boxed_str()));
     }
 
+    if let Err(e) = keycast_api::api::http::held_keys::validate_held_key_configuration() {
+        errors.push(Box::leak(e.into_boxed_str()));
+    }
+    if let Err(e) = keycast_api::api::http::github_auth::validate_github_auth_configuration() {
+        errors.push(Box::leak(e.into_boxed_str()));
+    }
+
     warn_atproto_control_plane_config();
 
     if !errors.is_empty() {
@@ -1535,6 +1542,34 @@ async fn async_main(worker_threads: usize) -> Result<(), Box<dyn std::error::Err
         .set(api_state.clone())
         .ok();
 
+    // content-web: account email addresses are kept encrypted under the master
+    // key, with a keyed fingerprint for lookup. The email data key is unwrapped
+    // once here; a background pass protects new and changed addresses.
+    let email_protector = keycast_core::email_protection::EmailProtector::load_or_create(
+        &database.pool,
+        api_state.key_manager.as_ref().as_ref(),
+    )
+    .await
+    .map_err(|e| format!("Email protection key unavailable: {e}"))?;
+    keycast_core::email_protection::install(email_protector);
+    {
+        let pool = database.pool.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+                let Some(protector) = keycast_core::email_protection::installed() else {
+                    continue;
+                };
+                match protector.protect_pending(&pool, 500).await {
+                    Ok(0) => {}
+                    Ok(rows) => tracing::info!(rows, "Protected account email addresses"),
+                    Err(error) => tracing::warn!(error = %error, "Email protection pass failed"),
+                }
+            }
+        });
+    }
+
     // Get API port (default 3000)
     let api_port = env::var("PORT")
         .unwrap_or_else(|_| "3000".to_string())
@@ -1761,6 +1796,19 @@ async fn async_main(worker_threads: usize) -> Result<(), Box<dyn std::error::Err
 
     let app = with_request_layers(app);
 
+    // content-web: BIND_ADDRESS (e.g. 127.0.0.1) binds that one address only,
+    // so a development instance is never reachable from other machines.
+    let bind_address: Option<std::net::SocketAddr> = match env::var("BIND_ADDRESS") {
+        Ok(value) if !value.trim().is_empty() => {
+            let ip: std::net::IpAddr = value
+                .trim()
+                .parse()
+                .map_err(|_| "BIND_ADDRESS must be an IP address".to_string())?;
+            Some(std::net::SocketAddr::new(ip, api_port))
+        }
+        _ => None,
+    };
+
     // Try dual-stack [::] first (accepts both IPv4 and IPv6), fall back to 0.0.0.0
     let dual_stack_addr = std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, api_port));
     let ipv4_addr = std::net::SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, api_port));
@@ -1773,22 +1821,29 @@ async fn async_main(worker_threads: usize) -> Result<(), Box<dyn std::error::Err
 
     // Spawn API server with graceful shutdown
     let api_handle = tokio::spawn(async move {
-        let listener = match tokio::net::TcpListener::bind(dual_stack_addr).await {
-            Ok(l) => {
-                tracing::info!(
-                    "🌐 API server listening on {} (dual-stack)",
-                    dual_stack_addr
-                );
-                l
-            }
-            Err(_) => {
-                tracing::info!(
-                    "🌐 API server listening on {} (IPv4-only, IPv6 unavailable)",
-                    ipv4_addr
-                );
-                tokio::net::TcpListener::bind(ipv4_addr)
-                    .await
-                    .expect("Failed to bind API server")
+        let listener = if let Some(addr) = bind_address {
+            tracing::info!("🌐 API server listening on {} (BIND_ADDRESS)", addr);
+            tokio::net::TcpListener::bind(addr)
+                .await
+                .expect("Failed to bind API server")
+        } else {
+            match tokio::net::TcpListener::bind(dual_stack_addr).await {
+                Ok(l) => {
+                    tracing::info!(
+                        "🌐 API server listening on {} (dual-stack)",
+                        dual_stack_addr
+                    );
+                    l
+                }
+                Err(_) => {
+                    tracing::info!(
+                        "🌐 API server listening on {} (IPv4-only, IPv6 unavailable)",
+                        ipv4_addr
+                    );
+                    tokio::net::TcpListener::bind(ipv4_addr)
+                        .await
+                        .expect("Failed to bind API server")
+                }
             }
         };
         axum::serve(listener, app)
@@ -2089,6 +2144,15 @@ mod tests {
         std::env::set_var("KMS_PROVIDER", "file");
         std::env::set_var("MASTER_KEY_PATH", "./master.key");
         std::env::set_var("DISABLE_EMAILS", "true");
+        // content-web settings are optional; a developer shell may carry dev values.
+        for key in [
+            "HELD_KEY_PROFILE_RELAYS",
+            "HELD_KEY_RATE_LIMIT_PER_HOUR",
+            "HELD_KEY_RATE_LIMIT_PER_DAY",
+            "GITHUB_CLIENT_ID",
+        ] {
+            std::env::remove_var(key);
+        }
     }
 
     fn clear_minimal_valid_environment() {

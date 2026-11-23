@@ -49,7 +49,7 @@ async fn registration_and_pin_resend_are_visible_in_development_inbox() {
     std::env::set_var("ENABLE_DEV_EMAIL_INBOX", "true");
     std::env::set_var("NODE_ENV", "development");
     std::env::set_var("RUST_ENV", "development");
-    std::env::remove_var("SENDGRID_API_KEY");
+    std::env::remove_var("RESEND_API_KEY");
     let pool = common::setup_test_db().await;
     let (auth_state, producer) = common::create_test_auth_state(pool.clone());
     auth_state

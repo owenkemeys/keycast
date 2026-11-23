@@ -1121,6 +1121,9 @@ fn validate_environment() -> Result<(), String> {
     if let Err(e) = keycast_api::api::http::held_keys::validate_held_key_configuration() {
         errors.push(Box::leak(e.into_boxed_str()));
     }
+    if let Err(e) = keycast_api::api::http::github_auth::validate_github_auth_configuration() {
+        errors.push(Box::leak(e.into_boxed_str()));
+    }
 
     warn_atproto_control_plane_config();
 

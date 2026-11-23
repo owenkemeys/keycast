@@ -9,6 +9,7 @@ pub mod auth_observability;
 pub mod claim;
 pub mod email_marketing;
 pub mod expensive_work;
+pub mod github_auth;
 pub mod groups;
 pub mod headless;
 pub mod held_keys;

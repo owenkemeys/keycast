@@ -1795,7 +1795,7 @@ mod tests {
     struct EmailEnvGuard {
         rust_env: Option<String>,
         node_env: Option<String>,
-        sendgrid_api_key: Option<String>,
+        resend_api_key: Option<String>,
         disable_emails: Option<String>,
     }
 
@@ -1804,7 +1804,7 @@ mod tests {
         fn drop(&mut self) {
             restore_env_var("RUST_ENV", self.rust_env.as_deref());
             restore_env_var("NODE_ENV", self.node_env.as_deref());
-            restore_env_var("SENDGRID_API_KEY", self.sendgrid_api_key.as_deref());
+            restore_env_var("RESEND_API_KEY", self.resend_api_key.as_deref());
             restore_env_var("DISABLE_EMAILS", self.disable_emails.as_deref());
         }
     }
@@ -1823,12 +1823,12 @@ mod tests {
         let guard = EmailEnvGuard {
             rust_env: std::env::var("RUST_ENV").ok(),
             node_env: std::env::var("NODE_ENV").ok(),
-            sendgrid_api_key: std::env::var("SENDGRID_API_KEY").ok(),
+            resend_api_key: std::env::var("RESEND_API_KEY").ok(),
             disable_emails: std::env::var("DISABLE_EMAILS").ok(),
         };
         std::env::set_var("RUST_ENV", "production");
         std::env::remove_var("NODE_ENV");
-        std::env::remove_var("SENDGRID_API_KEY");
+        std::env::remove_var("RESEND_API_KEY");
         std::env::remove_var("DISABLE_EMAILS");
         guard
     }

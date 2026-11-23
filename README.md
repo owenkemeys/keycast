@@ -261,11 +261,12 @@ Build with AWS support when using `KMS_PROVIDER=aws`: `cargo build --release --b
 
 If neither is set, requests from unknown domains are rejected.
 
-### Email (SendGrid)
+### Email (Resend)
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SENDGRID_API_KEY` | *(none)* | If set, sends via SendGrid; required in production unless `DISABLE_EMAILS=true` |
+| `RESEND_API_KEY` | *(none)* | If set, sends via Resend; required in production unless `DISABLE_EMAILS=true` |
+| `RESEND_API_URL` | `https://api.resend.com` | Resend API base URL (tests point it at a mock) |
 | `DISABLE_EMAILS` | *(none)* | Set to `true` to explicitly disable email delivery |
 | `FROM_EMAIL` | — | Sender email address |
 | `FROM_NAME` | `Divine` | Sender display name |

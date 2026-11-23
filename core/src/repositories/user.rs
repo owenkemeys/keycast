@@ -747,12 +747,18 @@ impl UserRepository {
         email: &str,
         tenant_id: i64,
     ) -> Result<Option<String>, RepositoryError> {
-        let result: Option<(String,)> =
-            sqlx::query_as("SELECT pubkey FROM users WHERE email = $1 AND tenant_id = $2")
-                .bind(email)
-                .bind(tenant_id)
-                .fetch_optional(&self.pool)
-                .await?;
+        // content-web: protected rows are found by keyed fingerprint; rows not
+        // yet protected (or a process without the key) use the plaintext column.
+        let result: Option<(String,)> = sqlx::query_as(
+            "SELECT pubkey FROM users WHERE tenant_id = $2
+               AND (email_fingerprint = $3
+                    OR ((email_fingerprint IS NULL OR $3 IS NULL) AND email = $1))",
+        )
+        .bind(email)
+        .bind(tenant_id)
+        .bind(crate::email_protection::installed_fingerprint(email))
+        .fetch_optional(&self.pool)
+        .await?;
         Ok(result.map(|r| r.0))
     }
 
@@ -780,10 +786,14 @@ impl UserRepository {
         tenant_id: i64,
     ) -> Result<Option<(String, String, bool, UserStatus)>, RepositoryError> {
         sqlx::query_as(
-            "SELECT pubkey, password_hash, email_verified, status FROM users WHERE email = $1 AND tenant_id = $2 AND password_hash IS NOT NULL",
+            "SELECT pubkey, password_hash, email_verified, status FROM users WHERE tenant_id = $2
+               AND password_hash IS NOT NULL
+               AND (email_fingerprint = $3
+                    OR ((email_fingerprint IS NULL OR $3 IS NULL) AND email = $1))",
         )
         .bind(email)
         .bind(tenant_id)
+        .bind(crate::email_protection::installed_fingerprint(email))
         .fetch_optional(&self.pool)
         .await
         .map_err(Into::into)

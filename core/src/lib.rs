@@ -6,6 +6,7 @@ pub mod coalescing_activity;
 pub mod creator_binding;
 pub mod custom_permissions;
 pub mod database;
+pub mod email_protection;
 pub mod encryption;
 pub mod env_config;
 pub mod groups;

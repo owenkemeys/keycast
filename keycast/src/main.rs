@@ -1542,6 +1542,34 @@ async fn async_main(worker_threads: usize) -> Result<(), Box<dyn std::error::Err
         .set(api_state.clone())
         .ok();
 
+    // content-web: account email addresses are kept encrypted under the master
+    // key, with a keyed fingerprint for lookup. The email data key is unwrapped
+    // once here; a background pass protects new and changed addresses.
+    let email_protector = keycast_core::email_protection::EmailProtector::load_or_create(
+        &database.pool,
+        api_state.key_manager.as_ref().as_ref(),
+    )
+    .await
+    .map_err(|e| format!("Email protection key unavailable: {e}"))?;
+    keycast_core::email_protection::install(email_protector);
+    {
+        let pool = database.pool.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+                let Some(protector) = keycast_core::email_protection::installed() else {
+                    continue;
+                };
+                match protector.protect_pending(&pool, 500).await {
+                    Ok(0) => {}
+                    Ok(rows) => tracing::info!(rows, "Protected account email addresses"),
+                    Err(error) => tracing::warn!(error = %error, "Email protection pass failed"),
+                }
+            }
+        });
+    }
+
     // Get API port (default 3000)
     let api_port = env::var("PORT")
         .unwrap_or_else(|_| "3000".to_string())

@@ -1796,6 +1796,19 @@ async fn async_main(worker_threads: usize) -> Result<(), Box<dyn std::error::Err
 
     let app = with_request_layers(app);
 
+    // content-web: BIND_ADDRESS (e.g. 127.0.0.1) binds that one address only,
+    // so a development instance is never reachable from other machines.
+    let bind_address: Option<std::net::SocketAddr> = match env::var("BIND_ADDRESS") {
+        Ok(value) if !value.trim().is_empty() => {
+            let ip: std::net::IpAddr = value
+                .trim()
+                .parse()
+                .map_err(|_| "BIND_ADDRESS must be an IP address".to_string())?;
+            Some(std::net::SocketAddr::new(ip, api_port))
+        }
+        _ => None,
+    };
+
     // Try dual-stack [::] first (accepts both IPv4 and IPv6), fall back to 0.0.0.0
     let dual_stack_addr = std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, api_port));
     let ipv4_addr = std::net::SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, api_port));
@@ -1808,22 +1821,29 @@ async fn async_main(worker_threads: usize) -> Result<(), Box<dyn std::error::Err
 
     // Spawn API server with graceful shutdown
     let api_handle = tokio::spawn(async move {
-        let listener = match tokio::net::TcpListener::bind(dual_stack_addr).await {
-            Ok(l) => {
-                tracing::info!(
-                    "🌐 API server listening on {} (dual-stack)",
-                    dual_stack_addr
-                );
-                l
-            }
-            Err(_) => {
-                tracing::info!(
-                    "🌐 API server listening on {} (IPv4-only, IPv6 unavailable)",
-                    ipv4_addr
-                );
-                tokio::net::TcpListener::bind(ipv4_addr)
-                    .await
-                    .expect("Failed to bind API server")
+        let listener = if let Some(addr) = bind_address {
+            tracing::info!("🌐 API server listening on {} (BIND_ADDRESS)", addr);
+            tokio::net::TcpListener::bind(addr)
+                .await
+                .expect("Failed to bind API server")
+        } else {
+            match tokio::net::TcpListener::bind(dual_stack_addr).await {
+                Ok(l) => {
+                    tracing::info!(
+                        "🌐 API server listening on {} (dual-stack)",
+                        dual_stack_addr
+                    );
+                    l
+                }
+                Err(_) => {
+                    tracing::info!(
+                        "🌐 API server listening on {} (IPv4-only, IPv6 unavailable)",
+                        ipv4_addr
+                    );
+                    tokio::net::TcpListener::bind(ipv4_addr)
+                        .await
+                        .expect("Failed to bind API server")
+                }
             }
         };
         axum::serve(listener, app)

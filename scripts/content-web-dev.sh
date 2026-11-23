@@ -63,6 +63,8 @@ ALLOWED_ORIGINS=http://127.0.0.1:${KEYCAST_PORT}
 BUNKER_RELAYS=ws://127.0.0.1:7777
 HELD_KEY_PROFILE_RELAYS=ws://127.0.0.1:7777
 ENABLE_DEV_EMAIL_INBOX=true
+ALLOWED_TENANT_DOMAINS=localhost
+ENABLE_TENANT_AUTO_PROVISIONING=true
 RUST_LOG=info,sqlx=warn
 EOF
     printf '%s' "$pg_password" > "$DEV/pg.pass"
@@ -102,10 +104,20 @@ start() {
   if pid_alive "$DEV/run/keycast.pid"; then
     echo "keycast already running (pid $(cat "$DEV/run/keycast.pid"))"
   else
-    (cd "$ROOT" && nohup "$bin" >>"$DEV/logs/keycast.log" 2>&1 & echo $! > "$DEV/run/keycast.pid")
-    for _ in $(seq 1 100); do
-      curl -fsS "http://127.0.0.1:$KEYCAST_PORT/health" >/dev/null 2>&1 && break; sleep 0.3
+    # Record the binary's own PID (nohup execs it), so stop can kill it by PID.
+    cd "$ROOT"
+    nohup "$bin" >>"$DEV/logs/keycast.log" 2>&1 </dev/null &
+    echo $! > "$DEV/run/keycast.pid"
+    local healthy=no
+    for _ in $(seq 1 200); do
+      pid_alive "$DEV/run/keycast.pid" || break
+      if curl -fsS "http://127.0.0.1:$KEYCAST_PORT/health" >/dev/null 2>&1; then healthy=yes; break; fi
+      sleep 0.3
     done
+    if [ "$healthy" != yes ]; then
+      status
+      die "keycast did not become healthy; see $DEV/logs/keycast.log"
+    fi
   fi
   status
 }

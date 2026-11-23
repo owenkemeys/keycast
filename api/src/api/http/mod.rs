@@ -11,6 +11,7 @@ pub mod email_marketing;
 pub mod expensive_work;
 pub mod groups;
 pub mod headless;
+pub mod held_keys;
 pub mod html_safety;
 pub mod metrics;
 pub mod nostr_rpc;

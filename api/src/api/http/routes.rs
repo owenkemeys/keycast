@@ -12,7 +12,7 @@ use tower::{timeout::error::Elapsed, ServiceBuilder};
 
 use crate::api::http::{
     admin, ap, atproto, atproto_oauth, auth, claim, email_marketing, expensive_work, headless,
-    metrics, nostr_rpc, oauth, og_diviner, policies, retention, service_deletion,
+    held_keys, metrics, nostr_rpc, oauth, og_diviner, policies, retention, service_deletion,
     service_provisioning, teams,
 };
 use crate::email_delivery::EmailDeliveryService;
@@ -404,6 +404,12 @@ pub fn api_routes(
         .layer(axum::Extension(email_delivery.clone()))
         .with_state(auth_state.clone());
 
+    // content-web: held keys for outside accounts, requested by our server only
+    // (KEYCAST_HELD_KEY_SERVICE_TOKEN; no CORS, server-to-server)
+    let held_key_routes = Router::new()
+        .route("/service/held-keys", post(held_keys::create_held_key))
+        .with_state(auth_state.clone());
+
     // Prometheus metrics endpoint (public, no auth required)
     // Uses in-memory atomic counters - no database access needed
     let metrics_route = Router::new().route("/metrics", get(metrics::metrics));
@@ -485,6 +491,7 @@ pub fn api_routes(
         .merge(batch_lookup_route) // Service-token route with a documented 1,000-email contract
         .merge(email_marketing_routes) // Service-token routes for the consent sync worker
         .merge(claim_routes.layer(public_cors.clone())) // Public - claim preloaded accounts
+        .merge(held_key_routes) // content-web: service-token route, server-to-server
         .merge(metrics_route.layer(public_cors.clone())) // Public - Prometheus metrics
         .merge(docs_route.layer(public_cors.clone()))
         .layer(axum::extract::DefaultBodyLimit::max(

@@ -2740,13 +2740,16 @@ impl UserRepository {
         pubkey: &str,
         tenant_id: i64,
     ) -> Result<Option<bool>, RepositoryError> {
-        let result: Option<(Option<String>,)> =
-            sqlx::query_as("SELECT email FROM users WHERE pubkey = $1 AND tenant_id = $2")
-                .bind(pubkey)
-                .bind(tenant_id)
-                .fetch_optional(&self.pool)
-                .await?;
-        Ok(result.map(|r| r.0.is_none()))
+        // A held key claimed through GitHub sign-in has no email but is claimed.
+        let result: Option<(bool,)> = sqlx::query_as(
+            "SELECT (email IS NULL AND external_claimed_at IS NULL)
+             FROM users WHERE pubkey = $1 AND tenant_id = $2",
+        )
+        .bind(pubkey)
+        .bind(tenant_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(result.map(|r| r.0))
     }
 
     /// Get user info for claim page (username, display_name).

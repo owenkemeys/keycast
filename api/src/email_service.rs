@@ -1216,9 +1216,12 @@ mod tests {
     // Resend sender against a mock Resend API
     // ------------------------------------------------------------------
 
+    /// (Authorization header, JSON body) of each request the mock received.
+    type RecordedRequests = Arc<Mutex<Vec<(Option<String>, serde_json::Value)>>>;
+
     #[derive(Clone, Default)]
     struct MockResend {
-        requests: Arc<Mutex<Vec<(Option<String>, serde_json::Value)>>>,
+        requests: RecordedRequests,
         status: Arc<Mutex<u16>>,
     }
 

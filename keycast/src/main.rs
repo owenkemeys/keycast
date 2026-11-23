@@ -2144,6 +2144,15 @@ mod tests {
         std::env::set_var("KMS_PROVIDER", "file");
         std::env::set_var("MASTER_KEY_PATH", "./master.key");
         std::env::set_var("DISABLE_EMAILS", "true");
+        // content-web settings are optional; a developer shell may carry dev values.
+        for key in [
+            "HELD_KEY_PROFILE_RELAYS",
+            "HELD_KEY_RATE_LIMIT_PER_HOUR",
+            "HELD_KEY_RATE_LIMIT_PER_DAY",
+            "GITHUB_CLIENT_ID",
+        ] {
+            std::env::remove_var(key);
+        }
     }
 
     fn clear_minimal_valid_environment() {
